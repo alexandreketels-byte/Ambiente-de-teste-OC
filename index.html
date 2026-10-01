@@ -5,8 +5,15 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📊</text></svg>">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Portal de Indicadores</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- Abre a conexão com o Apps Script (e o domínio pra onde ele redireciona a
+     resposta) enquanto a página ainda carrega: a 1ª chamada à API fica mais rápida. -->
+<link rel="preconnect" href="https://script.google.com">
+<link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<!-- defer: as bibliotecas (o XLSX tem quase 1 MB) baixam em paralelo sem travar
+     a tela; só são usadas nos importadores e no colar tabela, nunca na abertura. -->
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root {
     /* Tema escuro (padrão) */
@@ -295,7 +302,7 @@
     <div id="tratativasArea" style="display:none;margin-top:16px">
       <div class="modal-filtros" style="padding:0 0 10px;justify-content:space-between;align-items:center">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex:1">
-          <input type="text" id="tratativasBusca" placeholder="Buscar em todas as colunas..." oninput="aplicarFiltrosTratativas()">
+          <input type="text" id="tratativasBusca" placeholder="Buscar em todas as colunas..." oninput="aplicarFiltrosTratativasAdiado()">
           <div id="tratativasFiltrosSelects" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
             <span style="font-size:0.85rem;color:var(--cinza);white-space:nowrap">Entregue de</span>
@@ -363,7 +370,7 @@
     </div>
     <div class="progress-wrap" id="progressModal" style="margin:12px 20px 0"><div class="progress-bar" id="progressBarModal"></div></div>
     <div class="modal-filtros">
-      <input type="text" id="modalBusca" placeholder="Buscar em todas as colunas..." oninput="aplicarFiltrosModal()">
+      <input type="text" id="modalBusca" placeholder="Buscar em todas as colunas..." oninput="aplicarFiltrosModalAdiado()">
       <div id="modalFiltrosSelects" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
       <div id="modalFiltroDataEntrega" style="display:none;align-items:center;gap:6px;flex-wrap:wrap">
         <span style="font-size:0.85rem;color:var(--cinza);white-space:nowrap">Entregue de</span>
@@ -405,9 +412,13 @@ const _fetchOriginal = window.fetch.bind(window);
 window.fetch = function(url, options) {
   if (typeof url === 'string' && API_URL && url.indexOf(API_URL) === 0) {
     const pin = localStorage.getItem(CHAVE_LOCALSTORAGE_PIN) || '';
+    let acaoPost = '';
     if (options && options.method === 'POST' && typeof options.body === 'string') {
+      // Lê o corpo uma vez só (antes era lido duas vezes — pesado nos lotes de
+      // 2000 linhas) e aproveita pra pegar a "action" usada no timeout abaixo.
       try {
         const corpo = JSON.parse(options.body);
+        acaoPost = corpo.action || '';
         corpo.pin = pin;
         options = Object.assign({}, options, { body: JSON.stringify(corpo) });
       } catch (e) { /* corpo não é JSON — segue sem mexer */ }
@@ -424,10 +435,6 @@ window.fetch = function(url, options) {
     // importação grande (ex: Tabela Dinâmica com dezenas de milhares de
     // linhas) pode legitimamente demorar mais que isso — não é travamento.
     const controlador = new AbortController();
-    let acaoPost = '';
-    try {
-      acaoPost = options && typeof options.body === 'string' ? (JSON.parse(options.body).action || '') : '';
-    } catch (e) { /* corpo não é JSON */ }
     const ehEscritaPesada = /^import|^reconstruir/.test(acaoPost);
     const ehLeitura = !acaoPost || /^get/.test(acaoPost); // GET, ou POST que só lê (lista de pedidos grande demais pra URL)
     // Leitura: 20s (uma execução que travou costuma ser resolvida por uma nova
@@ -1598,9 +1605,23 @@ function renderKpisOcorrenciasDeTratativas() {
   const idxOcorrencia = COLUNAS_TRATATIVAS.indexOf('Ocorrência');
   const idxLoja = COLUNAS_TRATATIVAS.indexOf('Loja');
   const porTransportadora = {};
+  const idxPedido = COLUNAS_TRATATIVAS.indexOf('Pedido');
   const porTipoELoja = {}; // { tipo: { loja: quantidade, ... } }
   const lojasEncontradas = new Set();
+  // Um pedido pode ter mais de uma ocorrência: os indicadores abaixo contam
+  // PEDIDOS (sem repetir), pra não inflar o número quando há reaberturas.
+  const pedidos = new Set(), abertosHoje = new Set(), urgentes = new Set(), vencidos = new Set();
+  const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
   tratativasDadosAtuais.forEach(l => {
+    const ped = chavePedidoFront(l[idxPedido]);
+    if (ped) {
+      pedidos.add(ped);
+      const ab = aberturaDaLinha(l);
+      if (ab && rotuloAbertura(ab.dia, hoje) === 'novo') abertosHoje.add(ped);
+      if (l.urgente) urgentes.add(ped);
+      if (situacaoPrevisao(l, hoje) === 'vencida') vencidos.add(ped);
+    }
+
     const t = l[idxTransp] || '(sem transportadora)';
     porTransportadora[t] = (porTransportadora[t] || 0) + 1;
 
@@ -1610,7 +1631,16 @@ function renderKpisOcorrenciasDeTratativas() {
     if (!porTipoELoja[tipo]) porTipoELoja[tipo] = {};
     porTipoELoja[tipo][loja] = (porTipoELoja[tipo][loja] || 0) + 1;
   });
-  renderKpisOcorrencias({ ocorrencias: { total: tratativasDadosAtuais.length, porTransportadora } });
+  renderKpisOcorrencias({ ocorrencias: { total: tratativasDadosAtuais.length, porTransportadora } }, [
+    { valor: pedidos.size, rotulo: 'Pedidos com ocorrência',
+      dica: 'Pedidos distintos — um pedido com várias ocorrências conta uma vez só.' },
+    { valor: abertosHoje.size, rotulo: 'Abertas hoje', cor: abertosHoje.size ? 'var(--azul)' : '',
+      dica: 'Pedidos cuja 1ª mensagem da tratativa é de hoje (selo NEW).' },
+    { valor: urgentes.size, rotulo: 'Urgentes', cor: urgentes.size ? 'var(--vermelho)' : '',
+      dica: 'Pedidos marcados como URGENTE na tabela.' },
+    { valor: vencidos.size, rotulo: 'Previsão vencida', cor: vencidos.size ? 'var(--laranja)' : '',
+      dica: 'Ainda não entregues e com a previsão de entrega anterior a hoje.' }
+  ]);
   renderTabelaOcorrencias(porTransportadora);
 
   _ultimoPorTipoELoja = porTipoELoja;
@@ -1632,11 +1662,13 @@ function renderTabelaPorTipoOcorrencia(porTipoELoja, todasLojas) {
     tratativasPorLojaExpandido ? '▼ Ocultar detalhamento por loja' : '▶ Detalhar por loja';
 
   const lojas = tratativasPorLojaExpandido ? todasLojas : [];
-  const totalPorTipo = tipo => Object.values(porTipoELoja[tipo]).reduce((a, b) => a + b, 0);
-  const tiposOrdenados = tipos.sort((a, b) => totalPorTipo(b) - totalPorTipo(a));
+  const totais = {};
+  tipos.forEach(tipo => { totais[tipo] = Object.values(porTipoELoja[tipo]).reduce((a, b) => a + b, 0); });
+  const totalPorTipo = tipo => totais[tipo];
+  const tiposOrdenados = tipos.sort((a, b) => totais[b] - totais[a] || _collatorOrdenacao.compare(a, b));
 
   document.getElementById('tabelaPorTipoOcorrenciaThead').innerHTML =
-    `<tr><th>Tipo de Ocorrência</th>${lojas.map(loja => `<th>${loja}</th>`).join('')}<th>Total</th></tr>`;
+    `<tr><th>Tipo de Ocorrência</th>${lojas.map(loja => `<th>${escapeHtml(loja)}</th>`).join('')}<th>Total</th></tr>`;
 
   document.getElementById('tabelaPorTipoOcorrenciaBody').innerHTML = tiposOrdenados.map(tipo => {
     const porLoja = porTipoELoja[tipo];
@@ -1644,12 +1676,12 @@ function renderTabelaPorTipoOcorrencia(porTipoELoja, todasLojas) {
       const qtd = porLoja[loja] || 0;
       return qtd === 0
         ? `<td style="color:var(--cinza)">–</td>`
-        : `<td><a class="num-link" onclick="filtrarTratativasPorDuasColunas('Ocorrência', '${encodeURIComponent(tipo)}', 'Loja', '${encodeURIComponent(loja)}')">${qtd}</a></td>`;
+        : `<td><a class="num-link" onclick="filtrarTratativasPorDuasColunas('Ocorrência', '${encAttr(tipo)}', 'Loja', '${encAttr(loja)}')">${qtd}</a></td>`;
     }).join('');
     return `<tr>
-      <td>${tipo}</td>
+      <td>${escapeHtml(tipo)}</td>
       ${celulasLoja}
-      <td><a class="num-link" onclick="filtrarTratativasPorColuna('Ocorrência', '${encodeURIComponent(tipo)}')"><strong>${totalPorTipo(tipo)}</strong></a></td>
+      <td><a class="num-link" onclick="filtrarTratativasPorColuna('Ocorrência', '${encAttr(tipo)}')"><strong>${totalPorTipo(tipo)}</strong></a></td>
     </tr>`;
   }).join('');
 }
@@ -1691,16 +1723,13 @@ function montarFiltrosTratativas() {
 
   COLUNAS_TRATATIVAS.forEach((nome, idx) => {
     if (COLUNAS_TRATATIVAS_FILTRAVEIS.indexOf(nome) === -1) return;
-    const valores = Array.from(new Set(
-      tratativasDadosAtuais.map(l => l[idx]).filter(v => v !== undefined && v !== null && v !== '')
-    )).sort();
-    if (valores.length === 0) return;
+    const opcoes = opcoesFiltro(nome, tratativasDadosAtuais, idx);
+    if (!opcoes) return;
 
     tratativasFiltrosSelecionados[idx] = '';
     const select = document.createElement('select');
     select.dataset.coluna = nome;
-    select.innerHTML = `<option value="">${nome} (todos)</option>` +
-      valores.map(v => `<option value="${v}">${v}</option>`).join('');
+    select.innerHTML = opcoes;
     select.onchange = () => { tratativasFiltrosSelecionados[idx] = select.value; aplicarFiltrosTratativas(); };
     container.appendChild(select);
   });
@@ -1711,8 +1740,16 @@ function montarFiltrosTratativas() {
 // Usado pelos cards "Ocorrências" acima: ao clicar num número, filtra a
 // tabela de Tratativas por aquele valor (transportadora, tipo de
 // ocorrência, etc.) e rola a tela até ela.
+function valorFiltroDeClique(valorEncoded) {
+  if (valorEncoded === 'TODAS') return '';
+  const valor = decodeURIComponent(valorEncoded);
+  // "(sem loja)" etc. são as linhas com a coluna em branco — antes o clique
+  // filtrava por esse texto literal e a tabela vinha vazia.
+  return ROTULOS_VAZIO.indexOf(valor) !== -1 ? FILTRO_VAZIO : valor;
+}
+
 function filtrarTratativasPorColuna(nomeColuna, valorEncoded) {
-  const valor = valorEncoded === 'TODAS' ? '' : decodeURIComponent(valorEncoded);
+  const valor = valorFiltroDeClique(valorEncoded);
   const select = document.querySelector(`#tratativasFiltrosSelects select[data-coluna="${nomeColuna}"]`);
   if (select) {
     select.value = valor;
@@ -1731,7 +1768,7 @@ function filtrarTratativasPorTransportadora(nomeEncoded) {
 // pelos dois valores ao mesmo tempo.
 function filtrarTratativasPorDuasColunas(coluna1, valor1Encoded, coluna2, valor2Encoded) {
   [[coluna1, valor1Encoded], [coluna2, valor2Encoded]].forEach(([coluna, valorEncoded]) => {
-    const valor = valorEncoded === 'TODAS' ? '' : decodeURIComponent(valorEncoded);
+    const valor = valorFiltroDeClique(valorEncoded);
     const select = document.querySelector(`#tratativasFiltrosSelects select[data-coluna="${coluna}"]`);
     if (select) select.value = valor;
     const idx = COLUNAS_TRATATIVAS.indexOf(coluna);
@@ -1755,8 +1792,11 @@ function ordenarValor(v) {
     return new Date(Number(yyyy), Number(mm) - 1, Number(dd), Number(hh || 0), Number(min || 0)).getTime();
   }
 
-  const n = Number(texto.replace(',', '.'));
-  return isNaN(n) ? texto.toLowerCase() : n;
+  // "92,5%", "1.234,5" e "12" viram número; o resto ordena como texto
+  const semPct = texto.replace(/%$/, '').trim();
+  const numBR = /^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(semPct) ? semPct.replace(/\./g, '') : semPct;
+  const n = Number(numBR.replace(',', '.'));
+  return semPct === '' || isNaN(n) ? texto.toLowerCase() : n;
 }
 
 // ---------- Destaques visuais da tabela de Tratativas ----------
@@ -1861,12 +1901,25 @@ function coresPiscaMencao(texto) {
 // combinação possível de pessoas.
 let _piscaMencaoTick = 0;
 setInterval(() => {
+  if (document.hidden) return; // aba em segundo plano: ninguém está vendo
   _piscaMencaoTick++;
   document.querySelectorAll('.pisca-mencao[data-cores]').forEach(el => {
     const cores = el.dataset.cores.split('|');
     el.style.setProperty('--pisca-cor', cores[_piscaMencaoTick % cores.length]);
   });
 }, 350);
+
+// 'vencida' (não entregue e a previsão já passou), 'entregueComAtraso' ou ''.
+// Mesma regra pro destaque vermelho da Previsão e pro indicador "Previsão vencida".
+function situacaoPrevisao(linha, hoje) {
+  const dataPrevisao = parseDataBR(linha[COLUNAS_TRATATIVAS.indexOf('Previsão')]);
+  if (!dataPrevisao) return '';
+  if (linha[COLUNAS_TRATATIVAS.indexOf('Entregue?')] === 'Sim') {
+    const dataEntrega = parseDataBR(linha[COLUNAS_TRATATIVAS.indexOf('Data Entrega')]);
+    return dataEntrega && dataEntrega > dataPrevisao ? 'entregueComAtraso' : '';
+  }
+  return dataPrevisao < hoje ? 'vencida' : '';
+}
 
 function limparFiltroDataEntregaTratativas() {
   document.getElementById('tratativasDataEntregaDe').value = '';
@@ -1881,7 +1934,7 @@ function aplicarFiltrosTratativas() {
   Object.keys(tratativasFiltrosSelecionados).forEach(idxStr => {
     const idx = Number(idxStr);
     const valor = tratativasFiltrosSelecionados[idx];
-    if (valor) linhas = linhas.filter(l => String(l[idx] ?? '') === valor);
+    if (valor) linhas = linhas.filter(l => valorBateFiltro(l[idx], valor));
   });
 
   const dataDeStr = document.getElementById('tratativasDataEntregaDe').value;
@@ -1897,27 +1950,17 @@ function aplicarFiltrosTratativas() {
   }
 
   if (busca) {
-    linhas = linhas.filter(l => l.some(v => String(v ?? '').toLowerCase().includes(busca)));
+    // só as colunas da tabela (antes, depois de "Processar texto", a busca também
+    // olhava o histórico inteiro escondido — e depois do F5 não olhava mais)
+    linhas = linhas.filter(l => textoBuscaLinha(l, COLUNAS_TRATATIVAS.length).includes(busca));
   }
 
   if (tratativasOrdenacao.indice !== null) {
-    const idx = tratativasOrdenacao.indice;
-    const dir = tratativasOrdenacao.direcao;
-    linhas = linhas.slice().sort((a, b) => {
-      const va = ordenarValor(a[idx]);
-      const vb = ordenarValor(b[idx]);
-      if (va === null && vb === null) return 0;
-      if (va === null) return 1;
-      if (vb === null) return -1;
-      if (va < vb) return -1 * dir;
-      if (va > vb) return 1 * dir;
-      return 0;
-    });
+    linhas = ordenarLinhas(linhas, tratativasOrdenacao.indice, tratativasOrdenacao.direcao);
   }
 
   const indices = indicesColunasVisiveis();
   const idxPrevisao = COLUNAS_TRATATIVAS.indexOf('Previsão');
-  const idxEntregue = COLUNAS_TRATATIVAS.indexOf('Entregue?');
   const idxDataEntrega = COLUNAS_TRATATIVAS.indexOf('Data Entrega');
   const idxDataUltMsg = COLUNAS_TRATATIVAS.indexOf('Data Últ. Msg');
   const idxAutor = COLUNAS_TRATATIVAS.indexOf('Autor Últ. Msg');
@@ -1935,11 +1978,7 @@ function aplicarFiltrosTratativas() {
 
   document.getElementById('tratativasTabelaBody').innerHTML = linhas.length
     ? linhas.map((l, posicao) => {
-        const dataPrevisao = parseDataBR(l[idxPrevisao]);
-        const entregue = l[idxEntregue] === 'Sim';
-        const previsaoAtrasada = entregue
-          ? (!!dataPrevisao && !!parseDataBR(l[idxDataEntrega]) && parseDataBR(l[idxDataEntrega]) > dataPrevisao)
-          : (!!dataPrevisao && dataPrevisao < hoje);
+        const previsaoAtrasada = situacaoPrevisao(l, hoje) !== '';
         const linhaHoje = ehHoje(l[idxDataUltMsg]);
 
         const celulas = indices.map(idx => {
@@ -2013,6 +2052,7 @@ async function atualizarEmRotaTratativas() {
   tratativasDadosAtuais.forEach(l => {
     const info = lookup[normalizarChaveNF(l[idxNF])];
     l[idxEmRota] = info ? (info.emRota ? 'Em Rota' : (info.dataRomaneio || '')) : '';
+    delete l._busca;
   });
   aplicarFiltrosTratativas();
 }
@@ -2254,8 +2294,22 @@ function renderPainel(painel) {
   renderKpis(dados);
   renderMeta(painel.status);
   renderTabelaTransportadoras(dados.pedidosNaoRecebidos.porTransportadora);
-  renderKpisOcorrencias(dados);
-  renderTabelaOcorrencias(dados.ocorrencias.porTransportadora);
+  // O card Ocorrências é calculado das Tratativas desta tela (já com os tipos
+  // corrigidos à mão). Se elas já carregaram, o número do servidor (que pode estar
+  // defasado) não sobrescreve — antes, quem respondesse por último "ganhava".
+  if (!tratativasDadosAtuais.length && dados.ocorrencias) {
+    renderKpisOcorrencias(dados);
+    renderTabelaOcorrencias(dados.ocorrencias.porTransportadora);
+  }
+}
+
+// Percentual com 1 casa (vírgula, padrão BR); '–' se o servidor não mandou o número.
+function fmtPct(v) {
+  return typeof v === 'number' && isFinite(v) ? v.toFixed(1).replace('.', ',') + '%' : '–';
+}
+function corPerformance(v) {
+  if (typeof v !== 'number' || !isFinite(v)) return 'var(--cinza)';
+  return v >= 90 ? 'var(--verde)' : (v >= 80 ? 'var(--laranja)' : 'var(--vermelho)');
 }
 
 async function carregarIndicadores() {
@@ -2308,13 +2362,13 @@ async function carregarIndicadores() {
 
 function renderKpis(dados) {
   const perf = dados.pedidosNaoRecebidos.performanceGeral;
-  const corPerf = perf >= 90 ? 'var(--verde)' : (perf >= 80 ? 'var(--laranja)' : 'var(--vermelho)');
+  const corPerf = corPerformance(perf);
   const kpis = [
     { valor: dados.pedidosNaoRecebidos.total, rotulo: 'Pedidos não recebidos',
       onclick: `verPedidos('TODAS', false, 'Todos os pedidos não recebidos')` },
     { valor: dados.pedidosNaoRecebidos.totalEmAtraso, rotulo: 'Em atraso',
       onclick: `verPedidos('TODAS', true, 'Todos os pedidos em atraso')` },
-    { valor: perf.toFixed(1) + '%', rotulo: 'Performance geral', cor: corPerf }
+    { valor: fmtPct(perf), rotulo: 'Performance geral', cor: corPerf }
   ];
   document.getElementById('kpis').innerHTML = kpis.map(k => {
     const clicavel = k.onclick ? ' clicavel' : '';
@@ -2355,20 +2409,23 @@ let dadosTabelaTransportadoras = [];
 function renderTabelaTransportadoras(porTransportadora) {
   const tbody = document.getElementById('tabelaTransportadorasBody');
   // Ordena pela pior performance primeiro
-  const linhas = Object.entries(porTransportadora || {}).sort((a, b) => a[1].performance - b[1].performance);
+  // Pior performance primeiro; empate: quem tem mais atrasados; sem número, no fim
+  const perfOrd = v => (typeof v.performance === 'number' && isFinite(v.performance) ? v.performance : Infinity);
+  const linhas = Object.entries(porTransportadora || {})
+    .sort((a, b) => perfOrd(a[1]) - perfOrd(b[1]) || (b[1].emAtraso || 0) - (a[1].emAtraso || 0));
   dadosTabelaTransportadoras = linhas;
   if (linhas.length === 0) { document.getElementById('tabelaTransportadoras').style.display = 'none'; return; }
   document.getElementById('tabelaTransportadoras').style.display = 'table';
   tbody.innerHTML = linhas.map(([nome, v]) => {
-    const cor = v.performance >= 90 ? 'var(--verde)' : (v.performance >= 80 ? 'var(--laranja)' : 'var(--vermelho)');
+    const cor = corPerformance(v.performance);
     return `<tr>
-      <td>${nome}</td>
-      <td><a class="num-link" onclick="verPedidosPorNome('${encodeURIComponent(nome)}', false)">${v.qtd}</a></td>
-      <td><a class="num-link" onclick="verPedidosPorNome('${encodeURIComponent(nome)}', true, false)">${v.emAtraso}</a></td>
-      <td><a class="num-link" onclick="verPedidosPorNome('${encodeURIComponent(nome)}', false, true)">${v.indefinidos}</a></td>
-      <td><a class="num-link" onclick="verPedidosPorNome('${encodeURIComponent(nome)}', false, false, false, true)">${v.emRota}</a></td>
-      <td><a class="num-link" onclick="verPedidosPorNome('${encodeURIComponent(nome)}', false, false, true)">${v.entregues}</a></td>
-      <td style="color:${cor};font-weight:600">${v.performance.toFixed(1)}%</td>
+      <td>${escapeHtml(nome)}</td>
+      <td><a class="num-link" onclick="verPedidosPorNome('${encAttr(nome)}', false)">${v.qtd}</a></td>
+      <td><a class="num-link" onclick="verPedidosPorNome('${encAttr(nome)}', true, false)">${v.emAtraso}</a></td>
+      <td><a class="num-link" onclick="verPedidosPorNome('${encAttr(nome)}', false, true)">${v.indefinidos}</a></td>
+      <td><a class="num-link" onclick="verPedidosPorNome('${encAttr(nome)}', false, false, false, true)">${v.emRota}</a></td>
+      <td><a class="num-link" onclick="verPedidosPorNome('${encAttr(nome)}', false, false, true)">${v.entregues}</a></td>
+      <td style="color:${cor};font-weight:600">${fmtPct(v.performance)}</td>
     </tr>`;
   }).join('');
 }
@@ -2377,18 +2434,21 @@ function baixarIndicadoresExcel() {
   if (!dadosTabelaTransportadoras.length) { alert('Não há dados para baixar.'); return; }
   const colunas = ['Transportadora', 'Pedidos não recebidos', 'Em atraso', 'Indefinidos', 'Em Rota', 'Entregues', 'Performance'];
   const linhas = dadosTabelaTransportadoras.map(([nome, v]) =>
-    [nome, v.qtd, v.emAtraso, v.indefinidos, v.emRota, v.entregues, v.performance.toFixed(1) + '%']);
+    [nome, v.qtd, v.emAtraso, v.indefinidos, v.emRota, v.entregues, fmtPct(v.performance)]);
   exportarCSV(colunas, linhas, 'Indicadores por Transportadora');
 }
 
-function renderKpisOcorrencias(dados) {
+function renderKpisOcorrencias(dados, extras) {
   const kpis = [
     { valor: dados.ocorrencias.total, rotulo: 'Total de ocorrências',
       onclick: `filtrarTratativasPorTransportadora('TODAS')` }
-  ];
-  document.getElementById('kpisOcorrencias').innerHTML = kpis.map(k =>
-    `<div class="kpi clicavel" onclick="${k.onclick}"><div class="valor">${k.valor}</div><div class="rotulo">${k.rotulo}</div></div>`
-  ).join('');
+  ].concat(extras || []);
+  document.getElementById('kpisOcorrencias').innerHTML = kpis.map(k => {
+    const clicavel = k.onclick ? ' clicavel' : '';
+    const onclickAttr = k.onclick ? ` onclick="${k.onclick}"` : '';
+    const dica = k.dica ? ` title="${escapeHtml(k.dica)}"` : '';
+    return `<div class="kpi${clicavel}"${onclickAttr}${dica}><div class="valor"${k.cor ? ` style="color:${k.cor}"` : ''}>${k.valor}</div><div class="rotulo">${k.rotulo}</div></div>`;
+  }).join('');
 }
 
 let dadosTabelaOcorrencias = [];
@@ -2400,8 +2460,8 @@ function renderTabelaOcorrencias(porTransportadora) {
   if (linhas.length === 0) { document.getElementById('tabelaOcorrencias').style.display = 'none'; return; }
   document.getElementById('tabelaOcorrencias').style.display = 'table';
   tbody.innerHTML = linhas.map(([nome, qtd]) => `<tr>
-    <td>${nome}</td>
-    <td><a class="num-link" onclick="filtrarTratativasPorTransportadora('${encodeURIComponent(nome)}')">${qtd}</a></td>
+    <td>${escapeHtml(nome)}</td>
+    <td><a class="num-link" onclick="filtrarTratativasPorTransportadora('${encAttr(nome)}')">${qtd}</a></td>
   </tr>`).join('');
 }
 
@@ -2414,10 +2474,85 @@ function fmtData(v) {
   if (!v) return '';
   // Datas voltam da planilha como string ISO (ex: 2026-01-09T00:00:00.000Z)
   if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v)) {
+    // Data "pura" gravada como meia-noite UTC: usa o dia como veio. Convertendo
+    // pro fuso local (Brasília, UTC-3) ela virava o dia ANTERIOR (09/01 -> 08/01),
+    // o que mudava a previsão exibida e a contagem de atrasados no filtro.
+    const m = v.match(/^(\d{4})-(\d{2})-(\d{2})T00:00:00(?:\.0+)?Z$/);
+    if (m) return `${m[3]}/${m[2]}/${m[1]}`;
     return new Date(v).toLocaleDateString('pt-BR');
   }
   return v;
 }
+
+// Valor seguro pra ir dentro de onclick="f('...')": o encodeURIComponent não
+// codifica o apóstrofo, então um nome como "D'ANGELO" quebrava o clique.
+function encAttr(v) {
+  return encodeURIComponent(String(v === undefined || v === null ? '' : v)).replace(/'/g, '%27');
+}
+
+function textoSemHtml(v) {
+  return v === undefined || v === null ? '' : String(v).replace(/<[^>]*>/g, '').trim();
+}
+
+// Texto usado pela busca: só as colunas visíveis, minúsculo e SEM o HTML embutido
+// (antes, buscar "editar" ou "num-link" achava todas as linhas por causa do lápis).
+// Calculado uma vez e guardado na linha; quem altera uma célula apaga linha._busca.
+function textoBuscaLinha(linha, numColunas) {
+  if (linha._busca === undefined) {
+    linha._busca = linha.slice(0, numColunas).map(v => textoSemHtml(v).toLowerCase()).join('\u0001');
+  }
+  return linha._busca;
+}
+
+// Ordenação: calcula a chave de cada linha UMA vez (antes era recalculada, com
+// regex e Date, a cada comparação). Números antes de textos, textos em ordem
+// "natural" (pedido 9N antes de 10N) e vazios sempre no fim.
+const _collatorOrdenacao = new Intl.Collator('pt-BR', { numeric: true, sensitivity: 'base' });
+function compararChavesOrdenacao(va, vb, dir) {
+  if (va === null && vb === null) return 0;
+  if (va === null) return 1;
+  if (vb === null) return -1;
+  const ta = typeof va, tb = typeof vb;
+  if (ta !== tb) return (ta === 'number' ? -1 : 1) * dir;
+  if (ta === 'string') return _collatorOrdenacao.compare(va, vb) * dir;
+  return (va < vb ? -1 : va > vb ? 1 : 0) * dir;
+}
+function ordenarLinhas(linhas, idx, dir) {
+  return linhas
+    .map(l => [ordenarValor(l[idx]), l])
+    .sort((a, b) => compararChavesOrdenacao(a[0], b[0], dir))
+    .map(par => par[1]);
+}
+
+// Filtro "(em branco)" dos selects: permite filtrar as linhas sem valor naquela
+// coluna — é o que os indicadores mostram como "(sem loja)", "(sem transportadora)"...
+const FILTRO_VAZIO = '__vazio__';
+const ROTULOS_VAZIO = ['(sem transportadora)', '(sem ocorrência)', '(sem loja)'];
+function valorBateFiltro(valorCelula, filtro) {
+  const texto = String(valorCelula ?? '');
+  return filtro === FILTRO_VAZIO ? texto.trim() === '' : texto === filtro;
+}
+function opcoesFiltro(nome, linhas, idx) {
+  let temVazio = false;
+  const valores = Array.from(new Set(linhas.map(l => l[idx]).filter(v => {
+    const vazio = v === undefined || v === null || String(v).trim() === '';
+    if (vazio) temVazio = true;
+    return !vazio;
+  }))).sort((a, b) => _collatorOrdenacao.compare(String(a), String(b)));
+  if (valores.length === 0) return null;
+  return `<option value="">${escapeHtml(nome)} (todos)</option>` +
+    valores.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('') +
+    (temVazio ? `<option value="${FILTRO_VAZIO}">(em branco)</option>` : '');
+}
+
+// Busca enquanto digita: espera a pessoa parar de digitar por um instante em vez
+// de redesenhar a tabela inteira a cada tecla.
+function adiar(fn, ms) {
+  let t = null;
+  return () => { clearTimeout(t); t = setTimeout(fn, ms); };
+}
+const aplicarFiltrosTratativasAdiado = adiar(() => aplicarFiltrosTratativas(), 180);
+const aplicarFiltrosModalAdiado = adiar(() => aplicarFiltrosModal(), 180);
 
 // Mesma normalização usada no backend (Code.gs) pra bater a NF como chave
 // de cruzamento, ignorando pontuação/zeros à esquerda formatados diferente.
@@ -2534,15 +2669,12 @@ function montarFiltrosModal() {
 
   modalColunasAtuais.forEach((nome, idx) => {
     if (COLUNAS_FILTRAVEIS.indexOf(nome) === -1) return;
-    const valores = Array.from(new Set(
-      modalDadosAtuais.map(l => l[idx]).filter(v => v !== undefined && v !== null && v !== '')
-    )).sort();
-    if (valores.length === 0) return;
+    const opcoes = opcoesFiltro(nome, modalDadosAtuais, idx);
+    if (!opcoes) return;
 
     modalFiltrosSelecionados[idx] = '';
     const select = document.createElement('select');
-    select.innerHTML = `<option value="">${nome} (todos)</option>` +
-      valores.map(v => `<option value="${v}">${v}</option>`).join('');
+    select.innerHTML = opcoes;
     select.onchange = () => { modalFiltrosSelecionados[idx] = select.value; aplicarFiltrosModal(); };
     container.appendChild(select);
   });
@@ -2568,7 +2700,7 @@ function aplicarFiltrosModal() {
   Object.keys(modalFiltrosSelecionados).forEach(idxStr => {
     const idx = Number(idxStr);
     const valor = modalFiltrosSelecionados[idx];
-    if (valor) linhas = linhas.filter(l => String(l[idx] ?? '') === valor);
+    if (valor) linhas = linhas.filter(l => valorBateFiltro(l[idx], valor));
   });
 
   // Filtro por período de entrega — considera a data que estiver
@@ -2591,22 +2723,12 @@ function aplicarFiltrosModal() {
   }
 
   if (busca) {
-    linhas = linhas.filter(l => l.some(v => String(v ?? '').toLowerCase().includes(busca)));
+    const nCols = modalColunasAtuais.length;
+    linhas = linhas.filter(l => textoBuscaLinha(l, nCols).includes(busca));
   }
 
   if (modalOrdenacao.indice !== null) {
-    const idx = modalOrdenacao.indice;
-    const dir = modalOrdenacao.direcao;
-    linhas = linhas.slice().sort((a, b) => {
-      const va = ordenarValor(a[idx]);
-      const vb = ordenarValor(b[idx]);
-      if (va === null && vb === null) return 0;
-      if (va === null) return 1;
-      if (vb === null) return -1;
-      if (va < vb) return -1 * dir;
-      if (va > vb) return 1 * dir;
-      return 0;
-    });
+    linhas = ordenarLinhas(linhas, modalOrdenacao.indice, modalOrdenacao.direcao);
   }
 
   modalLinhasFiltradas = linhas;
@@ -2852,6 +2974,7 @@ function aplicarEdicaoOcorrenciaNaTabela(r) {
   tratativasDadosAtuais.forEach(l => {
     if (chavePedidoFront(l[idxPed]) !== chave) return;
     l[idxOc] = r.tipo;
+    delete l._busca;
     definirEdicaoOcorrencia(l, { original: r.original || '', por: r.por || '', em: r.em || '' });
     mudou = true;
   });
