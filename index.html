@@ -16,6 +16,7 @@
     --fundo: #0d1117; --card-bg: #161b22; --borda: #30363d; --texto: #e6edf3;
     --linha-hover: rgba(255,255,255,0.04); --linha-par: rgba(255,255,255,0.02);
     --linha-destaque: rgba(63,185,80,0.16);
+    --urgente-bg: rgba(248,81,73,0.24);
     --balao-bg: #211a35; --balao-borda: #6e5b9e;
   }
   :root[data-theme="light"] {
@@ -25,6 +26,7 @@
     --fundo: #f5f6f8; --card-bg: #ffffff; --borda: #dcdfe4; --texto: #1f2328;
     --linha-hover: rgba(0,0,0,0.03); --linha-par: rgba(0,0,0,0.015);
     --linha-destaque: rgba(38,162,105,0.14);
+    --urgente-bg: rgba(192,28,40,0.15);
     --balao-bg: #f3edff; --balao-borda: #8250df;
   }
   * { box-sizing: border-box; }
@@ -72,6 +74,12 @@
   tbody tr:hover { background: var(--linha-hover); }
   tbody tr.linha-destaque { background: var(--linha-destaque); }
   tbody tr.linha-destaque:hover { background: var(--linha-destaque); filter: brightness(1.1); }
+  /* Pedido URGENTE (caixinha marcada): linha vermelha em destaque, faixa na lateral e etiqueta */
+  tbody tr.linha-urgente { background: var(--urgente-bg); }
+  tbody tr.linha-urgente:hover { background: var(--urgente-bg); filter: brightness(1.12); }
+  tbody tr.linha-urgente td:first-child { box-shadow: inset 4px 0 0 var(--vermelho); font-weight: 700; }
+  .chk-urgente { width: 17px; height: 17px; cursor: pointer; accent-color: var(--vermelho); vertical-align: middle; margin: 0 7px 0 0; }
+  .selo-urgente { background: var(--vermelho); color: #fff; font-size: 0.62rem; font-weight: 800; letter-spacing: .06em; border-radius: 4px; padding: 1px 6px; margin-left: 7px; white-space: nowrap; vertical-align: middle; cursor: help; }
 
   /* Piscar quando a última mensagem menciona @camila, @victoria, @ketels,
      @paloma ou @luiz/@luis — a cor em si vem da variável --pisca-cor,
@@ -188,6 +196,16 @@
       <div class="progress-wrap" id="progressEmRotaGFW"><div class="progress-bar" id="progressBarEmRotaGFW"></div></div>
       <div class="status-line" id="statusEmRotaGFW"></div>
       <div class="meta" id="metaEmRotaGFW"></div>
+    </div>
+
+    <div class="card">
+      <h2>Importar Entregas GFW WhatsApp</h2>
+      <p class="desc">Arquivo .md com a exportação da conversa do WhatsApp com a GFW. O site lê os números de NF que os entregadores postaram (foto ou vídeo com o número, ou texto) e cruza pelo número da NF com Pedidos Não Recebidos: as que baterem passam a constar como entregues (WhatsApp). Notas que não são nossas simplesmente não casam. Cada importação acrescenta ao histórico (não apaga as anteriores; guarda 90 dias) e não guarda telefone nem nome de ninguém.</p>
+      <input type="file" id="fileEntregasWhats" accept=".md,.txt,text/markdown,text/plain">
+      <button id="btnEntregasWhats" onclick="importarEntregasWhatsApp()">Importar</button>
+      <div class="progress-wrap" id="progressEntregasWhats"><div class="progress-bar" id="progressBarEntregasWhats"></div></div>
+      <div class="status-line" id="statusEntregasWhats"></div>
+      <div class="meta" id="metaEntregasWhats"></div>
     </div>
   </div>
 
@@ -702,6 +720,153 @@ function fmtDataHoraCelEmRota(v) {
   return (v.getHours() === 0 && v.getMinutes() === 0) ? dataFmt : `${dataFmt} ${p(v.getHours())}:${p(v.getMinutes())}`;
 }
 
+// ---------- Entregas GFW WhatsApp (exportação .md da conversa) ----------
+// Lê o .md da conversa e devolve os números de NF que o pessoal postou (foto/vídeo com
+// legenda, ou texto), cada um com a data/hora da PRIMEIRA vez que apareceu. Não guarda
+// telefone nem nome de ninguém: só "NF" e "quando".
+const MESES_PT = { janeiro: 0, fevereiro: 1, marco: 2, abril: 3, maio: 4, junho: 5, julho: 6, agosto: 7, setembro: 8, outubro: 9, novembro: 10, dezembro: 11 };
+
+function semAcentoMinusculo(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+// "## 1 de outubro de 2026"  ou  "Data de exportação: 1 de outubro de 2026 às 13:34"
+function dataDeCabecalhoWhats(linha) {
+  const m = semAcentoMinusculo(linha).match(/(\d{1,2}) de ([a-z]+) de (\d{4})/);
+  if (!m || !(m[2] in MESES_PT)) return null;
+  return new Date(Number(m[3]), MESES_PT[m[2]], Number(m[1]));
+}
+
+// Tira telefones (ex: "+55 11 97847-9678", "(11) 97847-9678", "97847-9678") pra não virarem NF.
+function semTelefonesWhats(s) {
+  return s
+    .replace(/\+\d{1,3}[\s-]?\(?\d{2}\)?[\s-]?\d{4,5}[\s-]?\d{4}/g, ' ')
+    .replace(/\(?\d{2}\)?\s?9?\d{4}-\d{4}/g, ' ')
+    .replace(/\b\d{4,5}-\d{4}\b/g, ' ');
+}
+
+// "NF 128771", "Nf: 139913", "NFe 123456", "nota fiscal 128111", "NFs 128111, 128112 e 128113"
+const RE_NF_PALAVRA = /(?:^|[^A-Za-z0-9])(?:n\.?\s?f\.?s?(?:-?e)?|nota(?:\s+fiscal)?)\s*[:.\-#º°]*\s*(\d{4,9}(?:\s*(?:[,;\/]|\be\b)\s*\d{4,9})*)(?!\d)/gi;
+const RE_NUMERO = /(?:^|[^A-Za-z0-9_])(\d{4,8})(?![A-Za-z0-9])/g;
+const RE_MIDIA = /\[(?:imagem|v[ií]deo|foto|documento)\]/i;
+
+function numerosDe(texto, regex) {
+  const out = [];
+  regex.lastIndex = 0;
+  let m;
+  while ((m = regex.exec(texto)) !== null) {
+    String(m[1]).split(/\D+/).forEach(n => { if (n) out.push(n); });
+    if (m[0].length === 0) regex.lastIndex++;
+  }
+  return out;
+}
+
+// NFs de UMA mensagem (várias linhas: legenda, texto, citação de resposta).
+function nfsDaMensagem(linhas) {
+  const achados = new Set();
+  const temMidia = linhas.some(l => RE_MIDIA.test(l));
+  linhas.forEach(bruta => {
+    const eCitacao = /^\s*>/.test(bruta);
+    const linha = semTelefonesWhats(bruta.replace(/^\s*>\s?/, ''));
+
+    if (eCitacao) {
+      // Resposta citando uma mensagem antiga ("Imagem: 128920"): só vale se a resposta trouxe mídia
+      // (foto/vídeo = comprovante); resposta só de texto citando um pedido de alguém não conta.
+      if (!temMidia) return;
+      numerosDe(linha, /(?:imagem|v[ií]deo|foto|documento)\s*:\s*(\d{4,9})(?!\d)/gi).forEach(n => achados.add(n));
+      numerosDe(linha, RE_NF_PALAVRA).forEach(n => achados.add(n));
+      return;
+    }
+
+    // 1) número logo depois de "NF" / "nota"
+    numerosDe(linha, RE_NF_PALAVRA).forEach(n => achados.add(n));
+
+    // 2) legenda de foto/vídeo: qualquer número de 4 a 8 dígitos na linha da mídia
+    const resto = linha.replace(/\[[^\]]*\]/g, ' ');
+    if (RE_MIDIA.test(linha)) {
+      numerosDe(resto, RE_NUMERO).forEach(n => achados.add(n));
+    } else if (/^\s*\d{5,8}(\s+[A-Za-zÀ-ÿ.]+){0,3}\s*$/.test(resto)) {
+      // 3) linha só com o número (ex: "128775"), opcionalmente seguido do nome do entregador
+      numerosDe(resto, RE_NUMERO).forEach(n => achados.add(n));
+    }
+  });
+  return achados;
+}
+
+function dataHoraTexto(d) {
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function parseEntregasWhatsApp(texto) {
+  const linhas = String(texto || '').replace(/\r/g, '').split('\n');
+  let dataExportacao = null;
+  linhas.some(l => {
+    if (/^data de exporta/i.test(semAcentoMinusculo(l).trim())) { dataExportacao = dataDeCabecalhoWhats(l); return true; }
+    return false;
+  });
+
+  const mensagens = [];
+  let dataAtual = null, atual = null;
+  linhas.forEach(l => {
+    if (/^\s*#{1,6}\s/.test(l)) {                       // "## 1 de outubro de 2026" muda o dia corrente
+      const d = dataDeCabecalhoWhats(l);
+      if (d) dataAtual = d;
+      atual = null;
+      return;
+    }
+    const m = l.match(/^\[(\d{1,2}):(\d{2})\]\s+\*\*(.+?):\*\*\s?(.*)$/);
+    if (m) {
+      atual = { hora: Number(m[1]), minuto: Number(m[2]), dia: dataAtual || dataExportacao, linhas: [m[4]] };
+      mensagens.push(atual);
+    } else if (atual && l.trim() !== '' && l.trim() !== '---') {
+      atual.linhas.push(l);                             // continuação (legenda em outra linha, citação...)
+    }
+  });
+
+  const hoje = new Date();
+  const primeira = {}; // nf -> Date
+  mensagens.forEach(msg => {
+    const dia = msg.dia || new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+    const quando = new Date(dia.getFullYear(), dia.getMonth(), dia.getDate(), msg.hora, msg.minuto);
+    nfsDaMensagem(msg.linhas).forEach(nf => {
+      if (!primeira[nf] || quando < primeira[nf]) primeira[nf] = quando;
+    });
+  });
+
+  const entregas = Object.keys(primeira)
+    .sort((a, b) => Number(a) - Number(b) || (a < b ? -1 : 1))
+    .map(nf => [nf, dataHoraTexto(primeira[nf])]);
+  return { entregas, mensagens: mensagens.length };
+}
+
+async function importarEntregasWhatsApp() {
+  const input = document.getElementById('fileEntregasWhats');
+  const file = input.files[0];
+  if (!file) { alert('Selecione o arquivo .md da conversa primeiro.'); return; }
+  if (!API_URL || API_URL.indexOf('COLE_AQUI') === 0) { alert('Configure a API_URL no código antes de importar.'); return; }
+
+  setStatus('statusEntregasWhats', 'Lendo arquivo...', 'carregando');
+  toggleBtn('btnEntregasWhats', true);
+  try {
+    const lido = parseEntregasWhatsApp(await file.text());
+    if (lido.mensagens === 0) {
+      setStatus('statusEntregasWhats', 'Não reconheci mensagens nesse arquivo — confira se é a exportação .md da conversa do WhatsApp. Nada foi importado.', 'erro');
+      return;
+    }
+    if (lido.entregas.length === 0) {
+      setStatus('statusEntregasWhats', `Li ${lido.mensagens} mensagens, mas nenhuma com número de NF (foto ou vídeo com o número, ou texto "NF 123456"). Nada foi importado.`, 'erro');
+      return;
+    }
+    await enviarEmLotes(lido.entregas, 'importEntregasWhatsApp', 'statusEntregasWhats', 'progressEntregasWhats', 'progressBarEntregasWhats');
+    carregarIndicadores();
+  } catch (err) {
+    setStatus('statusEntregasWhats', 'Erro ao ler o arquivo: ' + err.message, 'erro');
+  } finally {
+    toggleBtn('btnEntregasWhats', false);
+  }
+}
+
 async function importarEmRotaGFW() {
   const input = document.getElementById('fileEmRotaGFW');
   const file = input.files[0];
@@ -1055,6 +1220,13 @@ function configurarPopoverHistoricoTratativas() {
     if (linha) abrirEditorOcorrencia(linha[COLUNAS_TRATATIVAS.indexOf('Pedido')], linha[COLUNAS_TRATATIVAS.indexOf('Ocorrência')]);
   });
 
+  if (corpoTratativas) corpoTratativas.addEventListener('change', e => {
+    const caixa = e.target.closest('.chk-urgente');
+    if (!caixa) return;
+    const linha = tratativasLinhasFiltradas[Number(caixa.dataset.idx)];
+    if (linha) alternarUrgente(linha[COLUNAS_TRATATIVAS.indexOf('Pedido')], caixa.checked);
+  });
+
   pop.addEventListener('mouseover', _cancelarEsconderHistorico);
   pop.addEventListener('mouseout', agendarEsconderHistoricoTratativas);
   document.addEventListener('click', e => {
@@ -1305,7 +1477,7 @@ async function finalizarProcessamentoTratativas(registros, idBotao, aoSucessoLoc
   const token = progressoTratativas.iniciar();
 
   try {
-    let lookup = {}, lookupEmRota = {}, lookupOcorrencia = {};
+    let lookup = {}, lookupEmRota = {}, lookupOcorrencia = {}, lookupUrgentes = {};
     let avisos = [];
     if (API_URL && API_URL.indexOf('COLE_AQUI') !== 0) {
       progressoTratativas.etapa(token, 8, 55);
@@ -1317,6 +1489,7 @@ async function finalizarProcessamentoTratativas(registros, idBotao, aoSucessoLoc
         lookup = resProcv.dados.tabDinamica || {};
         lookupEmRota = resProcv.dados.emRota || {};
         lookupOcorrencia = resProcv.dados.ocorrenciasManuais || {};
+        lookupUrgentes = resProcv.dados.urgentes || {};
         // Mesmo com sucesso na chamada, uma das duas partes (Tabela
         // Dinâmica ou Em Rota) pode ter falhado sozinha — a outra ainda
         // veio certinho, então só avisa sobre a que faltou.
@@ -1351,6 +1524,8 @@ async function finalizarProcessamentoTratativas(registros, idBotao, aoSucessoLoc
       linha.historico = historico; // usado direto pelo balão de "ver tratativa completa" nesta sessão
       // o "original" é o tipo que veio no texto (como o vendedor abriu)
       definirEdicaoOcorrencia(linha, ajuste && ajuste.tipo !== r.ocorrencia ? { original: r.ocorrencia, por: ajuste.por, em: ajuste.em } : null);
+      const urg = lookupUrgentes[r.pedido];
+      linha.urgente = urg ? { por: urg.por || '', em: urg.em || '' } : null;
       return linha;
     });
 
@@ -1749,6 +1924,7 @@ function aplicarFiltrosTratativas() {
   const idxEmRota = COLUNAS_TRATATIVAS.indexOf('Em Rota');
   const idxMensagem = COLUNAS_TRATATIVAS.indexOf('Mensagem');
   const idxOcorrencia = COLUNAS_TRATATIVAS.indexOf('Ocorrência');
+  const idxPedidoCol = COLUNAS_TRATATIVAS.indexOf('Pedido');
   const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
 
   tratativasLinhasFiltradas = linhas;
@@ -1795,10 +1971,18 @@ function aplicarFiltrosTratativas() {
             const selo = ed ? ` <span class="selo-editada" title="${dica}">alterada</span>` : '';
             return `<td>${escapeHtml(valor)}${selo} <span class="lapis-ocorrencia" data-idx="${posicao}" title="Alterar tipo de ocorrência">✏️</span></td>`;
           }
+          if (idx === idxPedidoCol) {
+            const u = l.urgente;
+            const dica = escapeHtml(u ? `Marcado como urgente${u.por ? ' por ' + u.por : ''}${u.em ? ' em ' + u.em : ''}` : 'Marcar como urgente');
+            const caixa = `<input type="checkbox" class="chk-urgente" data-idx="${posicao}" title="${dica}"${u ? ' checked' : ''}>`;
+            const selo = u ? `<span class="selo-urgente" title="${dica}">URGENTE</span>` : '';
+            return `<td>${caixa}${escapeHtml(valor)}${selo}</td>`;
+          }
           return `<td${estilo ? ` style="${estilo}"` : ''}>${valor}</td>`;
         }).join('');
 
-        return `<tr${linhaHoje ? ' class="linha-destaque"' : ''}>${celulas}</tr>`;
+        const classeLinha = l.urgente ? 'linha-urgente' : (linhaHoje ? 'linha-destaque' : '');
+        return `<tr${classeLinha ? ` class="${classeLinha}"` : ''}>${celulas}</tr>`;
       }).join('')
     : `<tr><td colspan="${indices.length}">Nenhum registro encontrado.</td></tr>`;
 }
@@ -1839,6 +2023,7 @@ function aplicarLinhasSalvas(linhas) {
     const linha = l.slice(0, COLUNAS_TRATATIVAS.length).map(v => fmtData(v));
     linha.historico = expandirHistorico(l[idxHistorico]);
     definirEdicaoOcorrencia(linha, infoEdicaoDoServidor(l[COLUNAS_TRATATIVAS.length + 1]));
+    linha.urgente = infoUrgenteDoServidor(l[COLUNAS_TRATATIVAS.length + 2]);
     return linha;
   });
   document.getElementById('tratativasArea').style.display = 'block';
@@ -1926,6 +2111,7 @@ async function enviarEmLotes(rows, action, statusId, progressWrapId, progressBar
   const totalBatches = Math.max(1, Math.ceil(rows.length / BATCH_SIZE));
   let totalNovos = 0;
   let totalAtualizados = 0;
+  let totalCasaram = 0;
 
   for (let i = 0; i < totalBatches; i++) {
     const batch = rows.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
@@ -1945,6 +2131,7 @@ async function enviarEmLotes(rows, action, statusId, progressWrapId, progressBar
       }
       if (typeof result.novos === 'number') totalNovos += result.novos;
       if (typeof result.atualizados === 'number') totalAtualizados += result.atualizados;
+      if (typeof result.casaramPNR === 'number') totalCasaram += result.casaramPNR;
     } catch (err) {
       let dica = '';
       if (err.name === 'AbortError') {
@@ -1960,6 +2147,8 @@ async function enviarEmLotes(rows, action, statusId, progressWrapId, progressBar
 
   if (action === 'importTabDinamica') {
     setStatus(statusId, `Importação concluída: ${totalNovos} pedidos novos, ${totalAtualizados} atualizados.`, 'ok');
+  } else if (action === 'importEntregasWhatsApp') {
+    setStatus(statusId, `Importação concluída: ${rows.length} NFs lidas (${totalNovos} novas, ${totalAtualizados} já conhecidas). ${totalCasaram} constam em Pedidos Não Recebidos (já entregues); ${rows.length - totalCasaram} não constam (notas de outros clientes ou pedidos que já saíram da lista).`, 'ok');
   } else {
     setStatus(statusId, `Importação concluída: ${rows.length} linhas.`, 'ok');
   }
@@ -2155,6 +2344,10 @@ function renderMeta(status) {
     document.getElementById('metaEmRotaGFW').textContent =
       `Última importação: ${new Date(status.EmRotaGFW.ultimaImportacao).toLocaleString('pt-BR')} (${status.EmRotaGFW.totalLinhas} linhas)`;
   }
+  if (status.EntregasWhatsApp) {
+    document.getElementById('metaEntregasWhats').textContent =
+      `Última importação: ${new Date(status.EntregasWhatsApp.ultimaImportacao).toLocaleString('pt-BR')} (${status.EntregasWhatsApp.totalLinhas} NFs no histórico)`;
+  }
 }
 
 let dadosTabelaTransportadoras = [];
@@ -2293,7 +2486,7 @@ let modalFiltrosSelecionados = {};
 let modalOrdenacao = { indice: null, direcao: 1 };
 
 // Colunas que, quando presentes, ganham um dropdown de filtro automático
-const COLUNAS_FILTRAVEIS = ['Transportadora', 'Status', 'Ocorrência', 'Entregue?', 'Entregue (GFW)', 'Entregue (RTE)'];
+const COLUNAS_FILTRAVEIS = ['Transportadora', 'Status', 'Ocorrência', 'Entregue?', 'Entregue (GFW)', 'Entregue (RTE)', 'Entregue (WhatsApp)'];
 
 function mostrarModalCarregando(titulo, colunas) {
   document.getElementById('modalTitulo').textContent = titulo;
@@ -2357,7 +2550,8 @@ function montarFiltrosModal() {
   // O filtro por período de entrega (GFW e/ou RTE) só faz sentido nos
   // relatórios que têm essas colunas (ex: Pedidos Não Recebidos).
   const temColunaEntrega = modalColunasAtuais.indexOf('Data Entrega (GFW)') !== -1 ||
-    modalColunasAtuais.indexOf('Data Entrega (RTE)') !== -1;
+    modalColunasAtuais.indexOf('Data Entrega (RTE)') !== -1 ||
+    modalColunasAtuais.indexOf('Data Entrega (WhatsApp)') !== -1;
   document.getElementById('modalFiltroDataEntrega').style.display = temColunaEntrega ? 'flex' : 'none';
 }
 
@@ -2378,17 +2572,17 @@ function aplicarFiltrosModal() {
   });
 
   // Filtro por período de entrega — considera a data que estiver
-  // preenchida, seja da baixa GFW ou da RTE (cada pedido normalmente só
-  // tem uma das duas).
+  // preenchida (baixa GFW, baixa RTE ou entrega informada no WhatsApp).
   const dataDeStr = document.getElementById('modalDataEntregaDe').value;
   const dataAteStr = document.getElementById('modalDataEntregaAte').value;
   if (dataDeStr || dataAteStr) {
     const idxGFW = modalColunasAtuais.indexOf('Data Entrega (GFW)');
     const idxRTE = modalColunasAtuais.indexOf('Data Entrega (RTE)');
+    const idxWhats = modalColunasAtuais.indexOf('Data Entrega (WhatsApp)');
     const dataDe = dataDeStr ? new Date(dataDeStr + 'T00:00:00') : null;
     const dataAte = dataAteStr ? new Date(dataAteStr + 'T00:00:00') : null;
     linhas = linhas.filter(l => {
-      const candidatas = [idxGFW, idxRTE]
+      const candidatas = [idxGFW, idxRTE, idxWhats]
         .filter(idx => idx !== -1)
         .map(idx => parseDataBR(l[idx]))
         .filter(d => d !== null);
@@ -2439,7 +2633,7 @@ function baixarModalExcel() {
   exportarCSV(modalColunasAtuais, modalLinhasFiltradas, document.getElementById('modalTitulo').textContent);
 }
 
-const COLUNAS_PEDIDOS_NAO_RECEBIDOS = ['Pedido', 'NF', 'Cliente', 'Cidade', 'Loja', 'Data Coleta', 'Prev Etg', 'Atraso (dias)', 'Em Rota', 'Entregue (GFW)', 'Data Entrega (GFW)', 'Entregue (RTE)', 'Data Entrega (RTE)', 'Última Mensagem'];
+const COLUNAS_PEDIDOS_NAO_RECEBIDOS = ['Pedido', 'NF', 'Cliente', 'Cidade', 'Loja', 'Data Coleta', 'Prev Etg', 'Atraso (dias)', 'Em Rota', 'Entregue (GFW)', 'Data Entrega (GFW)', 'Entregue (RTE)', 'Data Entrega (RTE)', 'Entregue (WhatsApp)', 'Data Entrega (WhatsApp)', 'Última Mensagem'];
 
 let ultimoFiltroPedidos = null;
 
@@ -2473,6 +2667,7 @@ async function verPedidos(transportadora, apenasAtraso, titulo, apenasIndefinido
         p.emRota ? '<span style="color:var(--verde);font-weight:700">Em Rota</span>' : (p.dataRomaneio || ''),
         p.entregueGFW ? 'Sim' : 'Não', fmtData(p.dataEntregaGFW),
         p.entregueRTE ? 'Sim' : 'Não', fmtData(p.dataEntregaRTE),
+        p.entregueWhats ? 'Sim' : 'Não', p.dataEntregaWhats || '',
         p.ultimaOcorrencia || ''
       ];
       linha.historico = expandirHistorico(p.ultimaOcorrenciaHistorico);
@@ -2541,6 +2736,61 @@ async function registrarPrevisaoRapida() {
     setStatus('statusEditPrev', 'Erro ao salvar a previsão: ' + err.message, 'erro');
   } finally {
     toggleBtn('btnEditPrev', false);
+  }
+}
+
+// ---------- Pedido URGENTE (caixinha na tabela de ocorrências) ----------
+function infoUrgenteDoServidor(json) { // '["quem","quando"]' -> { por, em } | null
+  if (!json) return null;
+  try { const a = JSON.parse(json); return { por: a[0] || '', em: a[1] || '' }; } catch (e) { return null; }
+}
+
+// Marca/desmarca TODAS as linhas desse pedido (o mesmo pedido pode ter mais de uma ocorrência) e redesenha.
+function aplicarUrgenteNaTabela(chave, info) {
+  const idxPed = COLUNAS_TRATATIVAS.indexOf('Pedido');
+  tratativasDadosAtuais.forEach(l => { if (chavePedidoFront(l[idxPed]) === chave) l.urgente = info; });
+  aplicarFiltrosTratativas();
+}
+
+// Mantém a cópia guardada no navegador em dia (senão, na próxima abertura, apareceria por um
+// instante o estado antigo antes de chegar a resposta do servidor).
+function atualizarCacheLocalUrgente(chave, r) {
+  const cache = lerCacheLocal(CHAVE_CACHE_TRATATIVAS_LOCAL);
+  if (!cache || !Array.isArray(cache.valor)) return;
+  const idxPed = COLUNAS_TRATATIVAS.indexOf('Pedido');
+  cache.valor.forEach(l => {
+    if (chavePedidoFront(l[idxPed]) === chave) l[COLUNAS_TRATATIVAS.length + 2] = r.urgente ? JSON.stringify([r.por || '', r.em || '']) : '';
+  });
+  gravarCacheLocal(CHAVE_CACHE_TRATATIVAS_LOCAL, cache.valor);
+}
+
+const _urgentesEmEnvio = new Set();
+
+// A linha já fica vermelha (ou deixa de ficar) NA HORA; o servidor grava em seguida. Se ele recusar
+// ou não responder, volta ao que era e avisa — assim nunca fica marcado só na sua tela.
+async function alternarUrgente(pedido, marcado) {
+  const chave = chavePedidoFront(pedido);
+  if (_urgentesEmEnvio.has(chave)) return; // clique repetido enquanto envia
+  _urgentesEmEnvio.add(chave);
+  const idxPed = COLUNAS_TRATATIVAS.indexOf('Pedido');
+  const anterior = (tratativasDadosAtuais.find(l => chavePedidoFront(l[idxPed]) === chave) || {}).urgente || null;
+  aplicarUrgenteNaTabela(chave, marcado ? { por: '', em: '' } : null);
+  try {
+    const resp = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'marcarUrgente', pedido, urgente: marcado })
+    });
+    const r = await resp.json();
+    if (!r || r.error || r.ok !== true) throw new Error((r && r.error) || 'resposta inesperada do servidor');
+    aplicarUrgenteNaTabela(chave, r.urgente ? { por: r.por || '', em: r.em || '' } : null); // agora com quem marcou e quando
+    atualizarCacheLocalUrgente(chave, r);
+  } catch (err) {
+    aplicarUrgenteNaTabela(chave, anterior);
+    const motivo = err && err.name === 'AbortError' ? 'o servidor demorou demais pra responder' : (err && err.message) || 'erro de rede';
+    setStatus('statusTratativas', `Não consegui ${marcado ? 'marcar' : 'desmarcar'} o pedido ${pedido} como urgente (${motivo}). Voltou ao que era.`, 'erro');
+  } finally {
+    _urgentesEmEnvio.delete(chave);
   }
 }
 
